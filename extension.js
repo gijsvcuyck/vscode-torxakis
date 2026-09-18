@@ -3,14 +3,14 @@ const vscode = require('vscode');
 function activate(context) {
     const selector = { language: 'torxakis', scheme: 'file' };
 
-    // In-memory index: symbolName -> Array<vscode.Location>
+    // In-memory index: symbolName -> Array<{ kind: string, location: vscode.Location }>
     const index = new Map();
     // Reverse map: fileUri -> Set<symbolName>
     const fileSymbols = new Map();
 
-    function addToIndex(name, location) {
+    function addToIndex(name, location, kind) {
         const arr = index.get(name) || [];
-        arr.push(location);
+        arr.push({ kind, location });
         index.set(name, arr);
     }
 
@@ -20,7 +20,7 @@ function activate(context) {
             for (const n of names) {
                 const arr = index.get(n);
                 if (arr) {
-                    const filtered = arr.filter(l => l.uri.toString() !== uriStr);
+                    const filtered = arr.filter(e => e.location.uri.toString() !== uriStr);
                     if (filtered.length) index.set(n, filtered); else index.delete(n);
                 }
             }
@@ -30,22 +30,29 @@ function activate(context) {
 
     async function indexDocument(doc) {
         try {
+            // Remove any existing entries for this document to avoid duplicates
+            removeFileFromIndex(doc.uri.toString());
             const txt = doc.getText();
-            const regex = /^\s*TYPEDEF\s+([A-Za-z0-9_]+)/gm;
+            const regex = /^\s*(TYPEDEF|PROCDEF)\s+([A-Za-z0-9_]+)/gm;
             let m;
             const names = new Set();
             while ((m = regex.exec(txt)) !== null) {
-                const name = m[1];
+                const kind = m[1];
+                const name = m[2];
                 const idx = m.index;
                 const pos = doc.positionAt(idx);
                 const loc = new vscode.Location(doc.uri, pos);
-                addToIndex(name, loc);
+                addToIndex(name, loc, kind);
                 names.add(name);
             }
             fileSymbols.set(doc.uri.toString(), names);
         } catch (e) {
             // ignore
         }
+    }
+
+    function escapeRegExp(s) {
+        return s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
     }
 
     async function buildIndex() {
@@ -106,17 +113,39 @@ function activate(context) {
             // Prefer indexed results
             const results = index.get(name);
             if (results && results.length) {
-                // If the declaration is in the same file and before current position, prefer it first
-                const sorted = results.slice().sort((a, b) => {
-                    if (a.uri.toString() === document.uri.toString() && b.uri.toString() !== document.uri.toString()) return -1;
-                    if (b.uri.toString() === document.uri.toString() && a.uri.toString() !== document.uri.toString()) return 1;
-                    return a.range.start.compareTo(b.range.start);
+                if (results.length === 1) return results[0].location;
+
+                // Prepare quick pick items for disambiguation
+                // Prefer entries in the same file, then by position
+                results.sort((a, b) => {
+                    const aSame = a.location.uri.toString() === document.uri.toString();
+                    const bSame = b.location.uri.toString() === document.uri.toString();
+                    if (aSame && !bSame) return -1;
+                    if (bSame && !aSame) return 1;
+                    return a.location.range.start.line - b.location.range.start.line;
                 });
-                return sorted;
+
+                const items = results.map(r => {
+                    const loc = r.location;
+                    return {
+                        label: `${r.kind} ${name}`,
+                        description: `${vscode.workspace.asRelativePath(loc.uri)}:${loc.range.start.line + 1}`,
+                        entry: r
+                    };
+                });
+
+                const pick = vscode.window.showQuickPick(items, { placeHolder: 'Multiple definitions found — select one' });
+                return Promise.resolve(pick && pick.then ? pick.then(p => p ? p.entry.location : results.map(r => r.location)) : null).then(res => {
+                    if (!res) return results.map(r => r.location);
+                    // If user selected a single item, `res` may be a Location (picked entry) or an array of Locations
+                    if (res && res.location) return res.location;
+                    return res;
+                });
             }
 
             // Fallback: scan current document synchronously
-            const pattern = new RegExp('^\\s*TYPEDEF\\s+' + name + '\\b', 'm');
+            const safeName = escapeRegExp(name);
+            const pattern = new RegExp('^\\s*(?:TYPEDEF|PROCDEF)\\s+' + safeName + '\\b', 'm');
             const txt = document.getText();
             const m = pattern.exec(txt);
             if (m) {

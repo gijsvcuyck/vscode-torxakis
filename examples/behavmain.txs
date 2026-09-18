@@ -1,0 +1,156 @@
+-- TorXakis <https://torxakis.org>
+-- ---------------------------------------------------------------------------------------------- --
+--
+-- Model of Matrix.org -- Matrix Main Behaviour
+-- ---------------------------------------------------------------------------------------------- --
+
+
+-- ---------------------------------------------------------------------------------------------- --
+-- process mmb : matrix main behaviour, with client authentication, login, rooms, messaging
+
+
+PROCDEF mmb [ Register             :: UserName # PassWord # Auth # Bool
+            ; Deactivate           :: Auth # MaybeAccessToken
+            ; Login                :: UserName # PassWord
+            ; Logout               :: AccessToken
+            ; WhoAmI               :: AccessToken
+            ; CreateRoom           :: AccessToken # MaybeRoomVisibility # MaybeRoomName
+            ; JoinRoom             :: AccessToken # RoomId
+            ; LeaveRoom            :: AccessToken # RoomId
+            ; InviteToRoom         :: AccessToken # RoomId # UserName # HomeServer
+            ; SendEvent            :: AccessToken # RoomId # EventType # TransactionId # EventBody
+            ; RoomMessages         :: AccessToken # RoomId
+            ; InvalidRequest       :: String
+            ; AuthRequiredResponse :: Int # SessionId # Flows
+            ; RegisterResponse     :: Int # HomeServer # UserName
+            ; LoginResponse        :: Int # HomeServer # UserName # AccessToken
+            ; RoomResponse         :: Int # RoomId
+            ; EventsResponse       :: Int # Events
+            ; Ok                   :: Int
+            ; NOk                  :: Int # String
+            ; InvalidResponse      :: String
+            ] ()
+  ::=
+        HIDE [ Vuss :: Users # Users
+             ; Vses :: SessionObjects # SessionObjects
+             ; Vrms :: Rooms # Rooms
+             ]
+         IN
+                 mmbVlocs [ Register,Deactivate,Login,Logout,WhoAmI,CreateRoom,JoinRoom,
+                            LeaveRoom,InviteToRoom,SendEvent,RoomMessages,InvalidRequest,
+                            AuthRequiredResponse,RegisterResponse,LoginResponse,
+                            RoomResponse,EventsResponse,Ok,NOk,InvalidResponse,
+                            Vuss,Vses,Vrms
+                          ] ()
+             |[Vuss,Vses,Vrms]|
+                 (
+                      vuss [Vuss] (Nil)
+                  |||
+                      vses [Vses] (Nil)
+                  |||
+                      vrms [Vrms] (Nil)
+                 )
+         NI
+ENDDEF
+
+
+PROCDEF mmbVlocs
+             [ Register             :: UserName # PassWord # Auth # Bool
+             ; Deactivate           :: Auth # MaybeAccessToken
+             ; Login                :: UserName # PassWord
+             ; Logout               :: AccessToken
+             ; WhoAmI               :: AccessToken
+             ; CreateRoom           :: AccessToken # MaybeRoomVisibility # MaybeRoomName
+             ; JoinRoom             :: AccessToken # RoomId
+             ; LeaveRoom            :: AccessToken # RoomId
+             ; InviteToRoom         :: AccessToken # RoomId # UserName # HomeServer
+             ; SendEvent            :: AccessToken # RoomId # EventType # TransactionId # EventBody
+             ; RoomMessages         :: AccessToken # RoomId
+             ; InvalidRequest       :: String
+             ; AuthRequiredResponse :: Int # SessionId # Flows
+             ; RegisterResponse     :: Int # HomeServer # UserName
+             ; LoginResponse        :: Int # HomeServer # UserName # AccessToken
+             ; RoomResponse         :: Int # RoomId
+             ; EventsResponse       :: Int # Events
+             ; Ok                   :: Int
+             ; NOk                  :: Int # String
+             ; InvalidResponse      :: String
+             ; Vuss                 :: Users # Users
+             ; Vses                 :: SessionObjects # SessionObjects
+             ; Vrms                 :: Rooms # Rooms
+             ] ()
+::=
+                 registerNone_succ [Register,AuthRequiredResponse,Vuss,Vses] ()
+              ## registerSidInhlog_succ [Register,RegisterResponse,Vuss,Vses] ()
+              ## registerSidLogin_succ [Register,LoginResponse,Vuss,Vses] ()
+              ## registerDummyNoSidInhlog_succ [Register,RegisterResponse,Vuss] ()
+              ## registerDummyNoSidLogin_succ [Register,LoginResponse,Vuss] ()
+              ##
+                 deactivateInit_succ [Deactivate,AuthRequiredResponse,Vuss,Vses] ()
+              ## deactivateFinal_succ [Deactivate,Ok,Vuss,Vses] ()
+              ##
+                 login_succ [Login,LoginResponse,NOk,Vuss] ()
+              ## logout_succ [Logout,Ok,NOk,Vuss] ()
+              ## whoami_succ [WhoAmI,RegisterResponse,NOk,Vuss] ()
+              ##
+                 createroom_succ [CreateRoom,RoomResponse,NOk,Vuss,Vrms] ()
+              ## joinroom_succ [JoinRoom,RoomResponse,NOk,Vuss,Vrms] ()
+              ## leaveroom_succ [LeaveRoom,Ok,NOk,Vuss,Vrms] ()
+              ## invitetoroom_succ [InviteToRoom,Ok,NOk,Vuss,Vrms] ()
+              ##
+                 sendevent_succ [SendEvent,Ok,NOk,Vuss,Vrms] ()
+              ## roommessages_succ [RoomMessages,EventsResponse,NOk,Vuss,Vrms] ()
+
+{-
+   -- for monitoring
+                 registerInvalid_err [Register,NOk] ()
+              ## registerUserExists_err [Register,NOk,Vuss] ()
+              ## registerSid_err [Register,NOk,Vuss,Vses] ()
+              ##
+                 deactivateInvalid_err [Deactivate,NOk] ()
+              ## deactivateInit_err [Deactivate,NOk,Vuss] ()
+              ## deactivateFinal_err [Deactivate,NOk,Vuss,Vses] ()
+              ##
+                 login_err [Login,NOk,Vuss] ()
+              ## logout_err [Logout,NOk,Vuss] ()
+              ## whoami_err [WhoAmI,NOk,Vuss] ()
+              ##
+                 createroom_err [CreateRoom,NOk,Vuss] ()
+              ## joinroom_err [JoinRoom,NOk,Vuss,Vrms] ()
+              ## leaveroom_err [LeaveRoom,NOk,Vuss,Vrms] ()
+              ## invitetoroom_err [InviteToRoom,NOk,Vuss,Vrms] ()
+              ##
+                 sendevent_err [SendEvent,NOk,Vuss,Vrms] ()
+              ## roommessages_err [RoomMessages,NOk,Vuss,Vrms]
+              ##
+                 invalid_request [InvalidRequest,NOk] ()
+-}
+    >>>
+        mmbVlocs [ Register,Deactivate,Login,Logout,WhoAmI,CreateRoom,JoinRoom,
+                   LeaveRoom,InviteToRoom,SendEvent,RoomMessages,InvalidRequest,
+                   AuthRequiredResponse,RegisterResponse,LoginResponse,
+                   RoomResponse,EventsResponse,Ok,NOk,InvalidResponse,
+                   Vuss,Vses,Vrms
+                 ] ()
+ENDDEF
+
+
+-- ---------------------------------------------------------------------------------------------- --
+-- invalid request (not-well-formed)
+
+
+PROCDEF invalid_request [ InvalidRequest :: String
+                        ; NOk            :: Int # String
+                        ] () EXIT
+        -- when Invalidrequest? What does it express?
+  ::=
+        InvalidRequest ?reason
+    >-> NOk ?sc ?ec
+    >-> EXIT
+ENDDEF
+
+
+-- ---------------------------------------------------------------------------------------------- --
+--                                                                                                --
+-- ---------------------------------------------------------------------------------------------- --
+
