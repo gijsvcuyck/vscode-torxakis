@@ -23,4 +23,9 @@
             "path": "./syntaxes/torxakis.tmLanguage.json"
         }]
     }
+    ,
+    "main": "./extension.js",
+    "activationEvents": [
+        "onLanguage:torxakis"
+    ]
 }
