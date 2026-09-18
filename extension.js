@@ -39,8 +39,10 @@ function activate(context) {
             while ((m = regex.exec(txt)) !== null) {
                 const kind = m[1];
                 const name = m[2];
-                const idx = m.index;
-                const pos = doc.positionAt(idx);
+                const matchStart = m.index;
+                const tokenIndexInMatch = m[0].indexOf(m[1]);
+                const declOffset = matchStart + (tokenIndexInMatch >= 0 ? tokenIndexInMatch : 0);
+                const pos = doc.positionAt(declOffset);
                 const loc = new vscode.Location(doc.uri, pos);
                 addToIndex(name, loc, kind, null);
                 names.add(name);
@@ -48,7 +50,7 @@ function activate(context) {
                 // If this is a TYPEDEF, also index its constructors and implicit isX functions
                 if (kind === 'TYPEDEF') {
                     // find ENDDEF after this typedef
-                    const startPos = m.index;
+                    const startPos = declOffset;
                     const endMarker = 'ENDDEF';
                     const endIdx = txt.indexOf(endMarker, startPos);
                     const block = endIdx !== -1 ? txt.slice(startPos, endIdx) : txt.slice(startPos);
@@ -76,10 +78,10 @@ function activate(context) {
                 // If this is a PROCDEF or MODELDEF, extract channel params and their types, and index them as CHANNEL
                 if (kind === 'PROCDEF' || kind === 'MODELDEF') {
                     // find bracketed params list starting after the name
-                    const afterName = txt.slice(idx + name.length);
+                    const afterName = txt.slice(declOffset + name.length);
                     const openBracket = afterName.indexOf('[');
                     if (openBracket !== -1) {
-                        const absOpen = idx + name.length + openBracket;
+                        const absOpen = declOffset + name.length + openBracket;
                         const closeBracket = txt.indexOf(']', absOpen + 1);
                         if (closeBracket !== -1) {
                             const header = txt.slice(absOpen + 1, closeBracket);
@@ -89,10 +91,10 @@ function activate(context) {
                             while ((chm = chanRegex.exec(header)) !== null) {
                                 const chanName = chm[1];
                                 const chanType = chm[2].trim();
-                                // scope is from idx to endIdx (ENDDEF) if present
-                                const scopeStart = idx;
+                                // scope is from declOffset to endIdx (ENDDEF) if present
+                                const scopeStart = declOffset;
                                 const endMarker = 'ENDDEF';
-                                const endIdx = txt.indexOf(endMarker, idx);
+                                const endIdx = txt.indexOf(endMarker, declOffset);
                                 const scopeEnd = endIdx !== -1 ? endIdx + endMarker.length : txt.length;
                                 // location: point at the start of the header where channel is declared
                                 const chanOffset = absOpen + 1 + chm.index;
@@ -337,7 +339,9 @@ function activate(context) {
             const m = pattern.exec(txt);
             if (m) {
                 const idx = m.index;
-                const pos = document.positionAt(idx);
+                const tokenIndexInMatch = m[0].search(/\S/);
+                const declOffset = idx + (tokenIndexInMatch >= 0 ? tokenIndexInMatch : 0);
+                const pos = document.positionAt(declOffset);
                 return new vscode.Location(document.uri, pos);
             }
 
@@ -349,7 +353,9 @@ function activate(context) {
                     const mm = pattern.exec(t);
                     if (mm) {
                         const i = mm.index;
-                        const p = doc.positionAt(i);
+                        const tokenIndexInMatch = mm[0].search(/\S/);
+                        const declOffset = i + (tokenIndexInMatch >= 0 ? tokenIndexInMatch : 0);
+                        const p = doc.positionAt(declOffset);
                         return new vscode.Location(doc.uri, p);
                     }
                     return null;
@@ -363,13 +369,14 @@ function activate(context) {
 
     // Hover provider for channel types
     const hoverProvider = {
-        provideHover(document, position, token) {
+        async provideHover(document, position, token) {
             const wordRange = document.getWordRangeAtPosition(position, /[A-Za-z0-9_]+/);
             if (!wordRange) return null;
             const name = document.getText(wordRange);
             const entries = index.get(name);
             if (!entries || !entries.length) return null;
             const offset = document.offsetAt(position);
+
             // find CHANNEL entry in-scope
             for (const e of entries) {
                 if (e.kind === 'CHANNEL' && e.location.uri.toString() === document.uri.toString()) {
@@ -377,10 +384,34 @@ function activate(context) {
                     if (typeof meta.scopeStart === 'number' && typeof meta.scopeEnd === 'number' && meta.scopeStart <= offset && offset < meta.scopeEnd) {
                         const md = new vscode.MarkdownString();
                         md.appendMarkdown(`**Channel** \`${name}\` — type: \`${meta.type}\``);
+                        // also show small code inline
+                        md.appendMarkdown('\n\n');
+                        md.appendCodeblock(meta.type || '', 'torxakis');
                         return new vscode.Hover(md, wordRange);
                     }
                 }
             }
+
+            // If hovering a type name, show the TYPEDEF block if available
+            // Prefer TYPEDEF in same file, else any TYPEDEF
+            const typedefEntry = entries.find(e => e.kind === 'TYPEDEF' && e.location.uri.toString() === document.uri.toString()) || entries.find(e => e.kind === 'TYPEDEF');
+            if (typedefEntry) {
+                try {
+                    const declDoc = await vscode.workspace.openTextDocument(typedefEntry.location.uri);
+                    const full = declDoc.getText();
+                    const startOffset = declDoc.offsetAt(typedefEntry.location.range.start);
+                    const endMarker = 'ENDDEF';
+                    const endIdx = full.indexOf(endMarker, startOffset);
+                    const sliceEnd = endIdx !== -1 ? endIdx + endMarker.length : Math.min(full.length, startOffset + 1000);
+                    const block = full.slice(startOffset, sliceEnd);
+                    const md = new vscode.MarkdownString();
+                    md.appendCodeblock(block, 'torxakis');
+                    return new vscode.Hover(md, wordRange);
+                } catch (e) {
+                    // ignore and fallthrough
+                }
+            }
+
             return null;
         }
     };

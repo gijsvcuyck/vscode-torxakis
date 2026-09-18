@@ -38,4 +38,8 @@
     "activationEvents": [
         "onLanguage:torxakis"
     ]
+    ,
+    "scripts": {
+        "test-hover": "node ./test/hover-block-starts.js"
+    }
 }
