@@ -8,9 +8,9 @@ function activate(context) {
     // Reverse map: fileUri -> Set<symbolName>
     const fileSymbols = new Map();
 
-    function addToIndex(name, location, kind) {
+    function addToIndex(name, location, kind, meta) {
         const arr = index.get(name) || [];
-        arr.push({ kind, location });
+        arr.push({ kind, location, meta });
         index.set(name, arr);
     }
 
@@ -33,7 +33,7 @@ function activate(context) {
             // Remove any existing entries for this document to avoid duplicates
             removeFileFromIndex(doc.uri.toString());
             const txt = doc.getText();
-            const regex = /^\s*(TYPEDEF|PROCDEF)\s+([A-Za-z0-9_]+)/gm;
+            const regex = /^\s*(TYPEDEF|PROCDEF|MODELDEF)\s+([A-Za-z0-9_]+)/gm;
             let m;
             const names = new Set();
             while ((m = regex.exec(txt)) !== null) {
@@ -42,7 +42,7 @@ function activate(context) {
                 const idx = m.index;
                 const pos = doc.positionAt(idx);
                 const loc = new vscode.Location(doc.uri, pos);
-                addToIndex(name, loc, kind);
+                addToIndex(name, loc, kind, null);
                 names.add(name);
 
                 // If this is a TYPEDEF, also index its constructors and implicit isX functions
@@ -62,13 +62,45 @@ function activate(context) {
                             const ctorOffset = startPos + assignIdx + 3 + cm.index;
                             const ctorPos = doc.positionAt(ctorOffset);
                             const ctorLoc = new vscode.Location(doc.uri, ctorPos);
-                            addToIndex(ctorName, ctorLoc, 'CONSTRUCTOR');
+                            addToIndex(ctorName, ctorLoc, 'CONSTRUCTOR', { parent: name });
                             names.add(ctorName);
 
                             // implicit isXXX function
                             const isName = 'is' + ctorName;
-                            addToIndex(isName, ctorLoc, 'IS_CONSTRUCTOR');
+                            addToIndex(isName, ctorLoc, 'IS_CONSTRUCTOR', { parent: name });
                             names.add(isName);
+                        }
+                    }
+                }
+
+                // If this is a PROCDEF or MODELDEF, extract channel params and their types, and index them as CHANNEL
+                if (kind === 'PROCDEF' || kind === 'MODELDEF') {
+                    // find bracketed params list starting after the name
+                    const afterName = txt.slice(idx + name.length);
+                    const openBracket = afterName.indexOf('[');
+                    if (openBracket !== -1) {
+                        const absOpen = idx + name.length + openBracket;
+                        const closeBracket = txt.indexOf(']', absOpen + 1);
+                        if (closeBracket !== -1) {
+                            const header = txt.slice(absOpen + 1, closeBracket);
+                            // parse entries like "ChanName :: Type"
+                            const chanRegex = /([A-Za-z0-9_]+)\s*::\s*([^;]+)/gm;
+                            let chm;
+                            while ((chm = chanRegex.exec(header)) !== null) {
+                                const chanName = chm[1];
+                                const chanType = chm[2].trim();
+                                // scope is from idx to endIdx (ENDDEF) if present
+                                const scopeStart = idx;
+                                const endMarker = 'ENDDEF';
+                                const endIdx = txt.indexOf(endMarker, idx);
+                                const scopeEnd = endIdx !== -1 ? endIdx + endMarker.length : txt.length;
+                                // location: point at the start of the header where channel is declared
+                                const chanOffset = absOpen + 1 + chm.index;
+                                const chanPos = doc.positionAt(chanOffset);
+                                const chanLoc = new vscode.Location(doc.uri, chanPos);
+                                addToIndex(chanName, chanLoc, 'CHANNEL', { scopeStart, scopeEnd, type: chanType });
+                                names.add(chanName);
+                            }
                         }
                     }
                 }
@@ -152,6 +184,17 @@ function activate(context) {
                     return r.kind !== 'CONSTRUCTOR' && r.kind !== 'IS_CONSTRUCTOR';
                 });
 
+                // Further filter CHANNEL candidates by scope: channel must be declared in a containing PROCDEF/MODELDEF
+                const currentOffset = document.offsetAt(position);
+                candidates = candidates.filter(r => {
+                    if (r.kind === 'CHANNEL') {
+                        if (r.location.uri.toString() !== document.uri.toString()) return false;
+                        const meta = r.meta || {};
+                        return (typeof meta.scopeStart === 'number' && typeof meta.scopeEnd === 'number') ? (meta.scopeStart <= currentOffset && currentOffset < meta.scopeEnd) : false;
+                    }
+                    return true;
+                });
+
                 if (!candidates.length) {
                     // No applicable indexed definitions for this context
                     return null;
@@ -188,7 +231,7 @@ function activate(context) {
 
             // Fallback: scan current document synchronously
             const safeName = escapeRegExp(name);
-            const pattern = new RegExp('^\\s*(?:TYPEDEF|PROCDEF)\\s+' + safeName + '\\b', 'm');
+            const pattern = new RegExp('^\\s*(?:TYPEDEF|PROCDEF|MODELDEF)\\s+' + safeName + '\\b', 'm');
             const txt = document.getText();
             const m = pattern.exec(txt);
             if (m) {
@@ -215,6 +258,31 @@ function activate(context) {
     };
 
     context.subscriptions.push(vscode.languages.registerDefinitionProvider(selector, provider));
+
+    // Hover provider for channel types
+    const hoverProvider = {
+        provideHover(document, position, token) {
+            const wordRange = document.getWordRangeAtPosition(position, /[A-Za-z0-9_]+/);
+            if (!wordRange) return null;
+            const name = document.getText(wordRange);
+            const entries = index.get(name);
+            if (!entries || !entries.length) return null;
+            const offset = document.offsetAt(position);
+            // find CHANNEL entry in-scope
+            for (const e of entries) {
+                if (e.kind === 'CHANNEL' && e.location.uri.toString() === document.uri.toString()) {
+                    const meta = e.meta || {};
+                    if (typeof meta.scopeStart === 'number' && typeof meta.scopeEnd === 'number' && meta.scopeStart <= offset && offset < meta.scopeEnd) {
+                        const md = new vscode.MarkdownString();
+                        md.appendMarkdown(`**Channel** \`${name}\` — type: \`${meta.type}\``);
+                        return new vscode.Hover(md, wordRange);
+                    }
+                }
+            }
+            return null;
+        }
+    };
+    context.subscriptions.push(vscode.languages.registerHoverProvider(selector, hoverProvider));
 }
 
 function deactivate() {}
