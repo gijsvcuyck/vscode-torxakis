@@ -11,6 +11,16 @@
         "Programming Languages"
     ],
     "contributes": {
+        "configuration": {
+            "title": "TorXakis",
+            "properties": {
+                "torxakis.scanFolder": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Optional folder to limit TorXakis file discovery to. Use a workspace folder name, a relative path like 'projectA/subdir', or an absolute path inside the workspace. Leave it empty to scan all folders."
+                }
+            }
+        },
         "languages": [{
             "id": "torxakis",
             "aliases": ["Torxakis", "torxakis"],

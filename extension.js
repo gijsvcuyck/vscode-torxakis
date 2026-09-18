@@ -115,11 +115,76 @@ function activate(context) {
         return s.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
     }
 
+    function getScanScopeUris() {
+        const configured = vscode.workspace.getConfiguration('torxakis').get('scanFolder', '').trim();
+        if (!configured) return null;
+
+        const normalized = configured.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
+        if (!normalized) return null;
+
+        const workspaceFolders = vscode.workspace.workspaceFolders || [];
+        const matches = [];
+
+        for (const folder of workspaceFolders) {
+            const folderFs = folder.uri.fsPath.replace(/\\/g, '/');
+            const folderName = folder.name;
+
+            if (normalized === '.' || normalized === folderName) {
+                matches.push(folder.uri);
+                continue;
+            }
+
+            const absPath = normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized);
+            if (absPath) {
+                const candidateFs = normalized.replace(/\\/g, '/');
+                if (candidateFs === folderFs || candidateFs.startsWith(folderFs + '/')) {
+                    const relative = candidateFs.slice(folderFs.length).replace(/^\/+/, '');
+                    matches.push(relative ? vscode.Uri.joinPath(folder.uri, relative) : folder.uri);
+                }
+                continue;
+            }
+
+            const candidate = vscode.Uri.joinPath(folder.uri, normalized);
+            matches.push(candidate);
+        }
+
+        return matches.length ? matches : null;
+    }
+
+    function isInScanScope(uri) {
+        const scopeUris = getScanScopeUris();
+        if (!scopeUris || !scopeUris.length) return true;
+
+        const uriFs = uri.fsPath.replace(/\\/g, '/');
+        for (const scopeUri of scopeUris) {
+            const scopeFs = scopeUri.fsPath.replace(/\\/g, '/');
+            if (uriFs === scopeFs || uriFs.startsWith(scopeFs + '/')) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // watchers for current scan scope (one per configured folder); rebuilt on config change
+    let watchers = [];
+
     async function buildIndex() {
         index.clear();
         fileSymbols.clear();
-        const uris = await vscode.workspace.findFiles('**/*.txs');
-        await Promise.all(uris.map(async uri => {
+
+        const scopeUris = getScanScopeUris();
+        let uriLists = [];
+
+        if (!scopeUris) {
+            // no scope configured — scan entire workspace
+            uriLists = [await vscode.workspace.findFiles('**/*.txs')];
+        } else {
+            // scan each configured scope using RelativePattern to ensure we include files inside that folder
+            uriLists = await Promise.all(scopeUris.map(su => vscode.workspace.findFiles(new vscode.RelativePattern(su, '**/*.txs'))));
+        }
+
+        const all = Array.from(new Set(uriLists.flat().map(u => u.toString()))).map(s => vscode.Uri.parse(s));
+
+        await Promise.all(all.map(async uri => {
             try {
                 const doc = await vscode.workspace.openTextDocument(uri);
                 await indexDocument(doc);
@@ -142,22 +207,31 @@ function activate(context) {
     // File system watcher to track external changes
     const watcher = vscode.workspace.createFileSystemWatcher('**/*.txs');
     watcher.onDidCreate(uri => {
+        if (!isInScanScope(uri)) return;
         vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc));
     });
     watcher.onDidChange(uri => {
+        if (!isInScanScope(uri)) return;
         vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc));
     });
     watcher.onDidDelete(uri => {
+        if (!isInScanScope(uri)) return;
         removeFileFromIndex(uri.toString());
     });
     context.subscriptions.push(watcher);
 
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
+        if (event.affectsConfiguration('torxakis.scanFolder')) {
+            buildIndex();
+        }
+    }));
+
     // Update index when editors change/save
     context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => {
-        if (doc.languageId === 'torxakis') updateDocument(doc);
+        if (doc.languageId === 'torxakis' && isInScanScope(doc.uri)) updateDocument(doc);
     }));
     context.subscriptions.push(vscode.workspace.onDidSaveTextDocument(doc => {
-        if (doc.languageId === 'torxakis') updateDocument(doc);
+        if (doc.languageId === 'torxakis' && isInScanScope(doc.uri)) updateDocument(doc);
     }));
     context.subscriptions.push(vscode.workspace.onDidCloseTextDocument(doc => {
         // keep index entries (optional); remove to free memory
@@ -242,7 +316,8 @@ function activate(context) {
 
             // As last resort, scan workspace (slow)
             return vscode.workspace.findFiles('**/*.txs').then(uris => {
-                const opens = uris.map(uri => vscode.workspace.openTextDocument(uri).then(doc => {
+                const scopedUris = uris.filter(isInScanScope);
+                const opens = scopedUris.map(uri => vscode.workspace.openTextDocument(uri).then(doc => {
                     const t = doc.getText();
                     const mm = pattern.exec(t);
                     if (mm) {
