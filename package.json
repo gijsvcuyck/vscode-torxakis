@@ -2,8 +2,8 @@
     "name": "torxakis",
     "displayName": "Torxakis",
     "description": "Torxakis language extension for vscode",
-    "version": "0.0.2",
-    "repository": "github/rubenhensen/vscode-torxakis",
+    "version": "0.0.3",
+    "repository": "https://github.com/gijsvcuyck/vscode-torxakis",
     "engines": {
         "vscode": "^1.63.0"
     },
