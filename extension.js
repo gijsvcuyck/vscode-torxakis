@@ -204,27 +204,54 @@ function activate(context) {
         await indexDocument(doc);
     }
 
-    // File system watcher to track external changes
-    const watcher = vscode.workspace.createFileSystemWatcher('**/*.txs');
-    watcher.onDidCreate(uri => {
-        if (!isInScanScope(uri)) return;
-        vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc));
-    });
-    watcher.onDidChange(uri => {
-        if (!isInScanScope(uri)) return;
-        vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc));
-    });
-    watcher.onDidDelete(uri => {
-        if (!isInScanScope(uri)) return;
-        removeFileFromIndex(uri.toString());
-    });
-    context.subscriptions.push(watcher);
+    // File system watchers per configured scope. Rebuilt when configuration changes.
+    function disposeWatchers() {
+        for (const w of watchers) {
+            try { w.dispose(); } catch (e) { }
+        }
+        watchers = [];
+    }
 
+    function setupWatchers() {
+        disposeWatchers();
+        const scopeUris = getScanScopeUris();
+
+        if (!scopeUris) {
+            // watch whole workspace
+            const w = vscode.workspace.createFileSystemWatcher('**/*.txs');
+            w.onDidCreate(uri => vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc)));
+            w.onDidChange(uri => vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc)));
+            w.onDidDelete(uri => removeFileFromIndex(uri.toString()));
+            context.subscriptions.push(w);
+            watchers.push(w);
+            return;
+        }
+
+        for (const su of scopeUris) {
+            try {
+                const rp = new vscode.RelativePattern(su, '**/*.txs');
+                const w = vscode.workspace.createFileSystemWatcher(rp);
+                w.onDidCreate(uri => vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc)));
+                w.onDidChange(uri => vscode.workspace.openTextDocument(uri).then(doc => updateDocument(doc)));
+                w.onDidDelete(uri => removeFileFromIndex(uri.toString()));
+                context.subscriptions.push(w);
+                watchers.push(w);
+            } catch (e) {
+                // ignore individual watcher failures
+            }
+        }
+    }
+
+    // watch for config changes and rebuild index/watchers
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('torxakis.scanFolder')) {
+            setupWatchers();
             buildIndex();
         }
     }));
+
+    // initialize watchers for current config
+    setupWatchers();
 
     // Update index when editors change/save
     context.subscriptions.push(vscode.workspace.onDidOpenTextDocument(doc => {
