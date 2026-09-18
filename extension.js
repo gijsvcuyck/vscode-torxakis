@@ -44,6 +44,34 @@ function activate(context) {
                 const loc = new vscode.Location(doc.uri, pos);
                 addToIndex(name, loc, kind);
                 names.add(name);
+
+                // If this is a TYPEDEF, also index its constructors and implicit isX functions
+                if (kind === 'TYPEDEF') {
+                    // find ENDDEF after this typedef
+                    const startPos = m.index;
+                    const endMarker = 'ENDDEF';
+                    const endIdx = txt.indexOf(endMarker, startPos);
+                    const block = endIdx !== -1 ? txt.slice(startPos, endIdx) : txt.slice(startPos);
+                    const assignIdx = block.indexOf('::=');
+                    if (assignIdx !== -1) {
+                        const ctorBlock = block.slice(assignIdx + 3);
+                        const ctorRegex = /^\s*(?:\|)?\s*([A-Za-z0-9_]+)(?=\s|\||\{|$)/gm;
+                        let cm;
+                        while ((cm = ctorRegex.exec(ctorBlock)) !== null) {
+                            const ctorName = cm[1];
+                            const ctorOffset = startPos + assignIdx + 3 + cm.index;
+                            const ctorPos = doc.positionAt(ctorOffset);
+                            const ctorLoc = new vscode.Location(doc.uri, ctorPos);
+                            addToIndex(ctorName, ctorLoc, 'CONSTRUCTOR');
+                            names.add(ctorName);
+
+                            // implicit isXXX function
+                            const isName = 'is' + ctorName;
+                            addToIndex(isName, ctorLoc, 'IS_CONSTRUCTOR');
+                            names.add(isName);
+                        }
+                    }
+                }
             }
             fileSymbols.set(doc.uri.toString(), names);
         } catch (e) {
@@ -113,11 +141,27 @@ function activate(context) {
             // Prefer indexed results
             const results = index.get(name);
             if (results && results.length) {
-                if (results.length === 1) return results[0].location;
+                // Determine whether this occurrence is a call: immediately followed by optional whitespace and '('
+                const afterOffset = document.offsetAt(wordRange.end);
+                const rest = document.getText().slice(afterOffset);
+                const callContext = /^\s*\(/.test(rest);
+
+                // Filter out constructor/indexed is-functions when NOT in a call context
+                let candidates = results.filter(r => {
+                    if (callContext) return true;
+                    return r.kind !== 'CONSTRUCTOR' && r.kind !== 'IS_CONSTRUCTOR';
+                });
+
+                if (!candidates.length) {
+                    // No applicable indexed definitions for this context
+                    return null;
+                }
+
+                if (candidates.length === 1) return candidates[0].location;
 
                 // Prepare quick pick items for disambiguation
                 // Prefer entries in the same file, then by position
-                results.sort((a, b) => {
+                candidates.sort((a, b) => {
                     const aSame = a.location.uri.toString() === document.uri.toString();
                     const bSame = b.location.uri.toString() === document.uri.toString();
                     if (aSame && !bSame) return -1;
@@ -125,7 +169,7 @@ function activate(context) {
                     return a.location.range.start.line - b.location.range.start.line;
                 });
 
-                const items = results.map(r => {
+                const items = candidates.map(r => {
                     const loc = r.location;
                     return {
                         label: `${r.kind} ${name}`,
@@ -135,9 +179,8 @@ function activate(context) {
                 });
 
                 const pick = vscode.window.showQuickPick(items, { placeHolder: 'Multiple definitions found — select one' });
-                return Promise.resolve(pick && pick.then ? pick.then(p => p ? p.entry.location : results.map(r => r.location)) : null).then(res => {
-                    if (!res) return results.map(r => r.location);
-                    // If user selected a single item, `res` may be a Location (picked entry) or an array of Locations
+                return Promise.resolve(pick && pick.then ? pick.then(p => p ? p.entry.location : candidates.map(r => r.location)) : null).then(res => {
+                    if (!res) return candidates.map(r => r.location);
                     if (res && res.location) return res.location;
                     return res;
                 });
